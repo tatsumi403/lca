@@ -1,7 +1,9 @@
-"""REPL 本体。"""
+"""REPL 本体 + 一発実行モード。"""
 
 from __future__ import annotations
 
+import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -19,7 +21,44 @@ from .skills import load_skills
 from .tools import build_registry
 
 
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="lca",
+        description="Local Coding Agent — Ollama で動くローカルコーディングエージェント",
+    )
+    parser.add_argument(
+        "-C", "--dir", metavar="DIR",
+        help="起動前に移動する作業ディレクトリ（設定・スキル・指示ファイル・相対パスの基準）",
+    )
+    parser.add_argument(
+        "-p", "--prompt", metavar="TEXT",
+        help="指示を1ターンだけ実行して終了する（REPLに入らない）",
+    )
+    parser.add_argument(
+        "prompt_args", nargs="*",
+        help="位置引数として渡す指示（-p の代わり）",
+    )
+    parser.add_argument("-V", "--version", action="version", version=f"lca {__version__}")
+    return parser.parse_args(argv)
+
+
+def _resolve_oneshot(prompt: str | None, prompt_args: list[str]) -> str | None:
+    """一発実行する指示を決める。-p 優先、なければ位置引数を連結。無ければ None（REPL）。"""
+    if prompt:
+        return prompt
+    joined = " ".join(prompt_args).strip()
+    return joined or None
+
+
 def main() -> None:
+    args = _parse_args()
+    if args.dir:
+        try:
+            os.chdir(args.dir)
+        except OSError as e:
+            print(f"cd 失敗: {args.dir}: {e}", file=sys.stderr)
+            sys.exit(1)
+
     console = Console()
     config = load_config()
     cwd = Path.cwd()
@@ -36,13 +75,39 @@ def main() -> None:
     agent = Agent(llm, registry, permissions, history, console, config)
     agent.system_prompt = build_system_prompt(config, skills, cwd)
 
+    def process(line: str) -> bool:
+        """1行の入力を処理する。REPLを続けるなら True、終了なら False。"""
+        d = commands.dispatch(line, skills, custom_commands)
+        if d.kind == "builtin":
+            if d.action == "quit":
+                return False
+            _run_builtin(d.action, console, history, llm, skills, registry)
+            return True
+        if d.kind == "unknown":
+            console.print(f"[red]不明なコマンド: /{d.action}[/red] (/help 参照)")
+            return True
+        prompt = d.prompt if d.kind == "prompt" else line
+        try:
+            agent.run_turn(prompt)
+        except KeyboardInterrupt:
+            console.print("\n[yellow]中断しました[/yellow]")
+        except ollama.ResponseError as e:
+            console.print(f"[red]Ollama エラー: {e.error}[/red]")
+        return True
+
     console.print(
         f"[bold]lca[/bold] v{__version__}  "
         f"[dim]model={config.model} num_ctx={config.num_ctx} "
         f"skills={len(skills)} cwd={cwd}[/dim]"
     )
-    console.print("[dim]/help でコマンド一覧、Ctrl+D で終了[/dim]\n")
 
+    # 一発実行モード: -p か位置引数があれば1ターン実行して終了
+    oneshot = _resolve_oneshot(args.prompt, args.prompt_args)
+    if oneshot is not None:
+        process(oneshot)
+        return
+
+    console.print("[dim]/help でコマンド一覧、Ctrl+D で終了[/dim]\n")
     while True:
         try:
             line = console.input("[bold green]› [/bold green]").strip()
@@ -53,24 +118,8 @@ def main() -> None:
             continue
         if not line:
             continue
-
-        d = commands.dispatch(line, skills, custom_commands)
-        if d.kind == "builtin":
-            if d.action == "quit":
-                break
-            _run_builtin(d.action, console, history, llm, skills, registry)
-            continue
-        if d.kind == "unknown":
-            console.print(f"[red]不明なコマンド: /{d.action}[/red] (/help 参照)")
-            continue
-        prompt = d.prompt if d.kind == "prompt" else line
-
-        try:
-            agent.run_turn(prompt)
-        except KeyboardInterrupt:
-            console.print("\n[yellow]中断しました[/yellow]")
-        except ollama.ResponseError as e:
-            console.print(f"[red]Ollama エラー: {e.error}[/red]")
+        if not process(line):
+            break
         console.print()
 
     console.print("[dim]bye[/dim]")
