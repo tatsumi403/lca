@@ -60,8 +60,8 @@ def main() -> None:
             sys.exit(1)
 
     console = Console()
-    config = load_config()
     cwd = Path.cwd()
+    config = load_config(cwd)
 
     llm = LLM(host=config.ollama_host, model=config.model, num_ctx=config.num_ctx)
     if not _check_ollama(llm, console, config):
@@ -95,18 +95,17 @@ def main() -> None:
             console.print(f"[red]Ollama エラー: {e.error}[/red]")
         return True
 
-    console.print(
-        f"[bold]lca[/bold] v{__version__}  "
-        f"[dim]model={config.model} num_ctx={config.num_ctx} "
-        f"skills={len(skills)} cwd={cwd}[/dim]"
-    )
-
-    # 一発実行モード: -p か位置引数があれば1ターン実行して終了
+    # 一発実行モード: -p か位置引数があれば1ターン実行して終了（バナー等のREPL演出は出さない）
     oneshot = _resolve_oneshot(args.prompt, args.prompt_args)
     if oneshot is not None:
         process(oneshot)
         return
 
+    console.print(
+        f"[bold]lca[/bold] v{__version__}  "
+        f"[dim]model={config.model} num_ctx={config.num_ctx} "
+        f"skills={len(skills)} cwd={cwd}[/dim]"
+    )
     console.print("[dim]/help でコマンド一覧、Ctrl+D で終了[/dim]\n")
     while True:
         try:
